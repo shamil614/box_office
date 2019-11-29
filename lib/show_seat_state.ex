@@ -15,25 +15,43 @@ defmodule BoxOffice.ShowSeatState do
     GenStateMachine.start_link(__MODULE__, {current_state, data})
   end
 
+  ### Client api
+
+  @doc """
+  Get the current state and data from the process.
+  """
   def get_state(pid) do
     :sys.get_state(pid)
   end
 
+  @doc """
+  Get the current state of the seat.
+  """
   def current_state(pid) do
     {current_state, _data} = :sys.get_state(pid)
     current_state
   end
 
+  @doc """
+  Hold a seat temporarily for a customer.
+  """
   def hold(pid, customer = %Customer{}) do
     GenStateMachine.call(pid, {:hold, customer})
   end
 
+  @doc """
+  Purchase a seat for a customer.
+  """
   def purchase(pid, customer = %Customer{}) do
     GenStateMachine.call(pid, {:purchase, customer})
   end
 
   ### Server API
 
+  @doc """
+  State can transition from `available` to `held`.
+  A timeout is set to reset the state.
+  """
   def handle_event({:call, from}, {:hold, customer}, :available, data) do
     %{state_timeout: state_timeout} = data
 
@@ -41,20 +59,42 @@ defmodule BoxOffice.ShowSeatState do
       data
       |> Map.put(:current_customer, customer)
 
-    {:next_state, :hold, data, [{:reply, from, :hold}, state_timeout]}
+    {:next_state, :held, data, [{:reply, from, {:ok, :held}}, {:state_timeout, state_timeout, :hold_timeout}]}
   end
 
-  def handle_event({:call, from}, {:purchase, customer}, :hold, data) do
-    %{state_timeout: state_timeout} = data
+  @doc """
+  Can't transition from `purchased` to `held`.
+  """
+  def handle_event({:call, from}, {:hold, _customer}, :purchased, _data) do
+    reason = {:no_transition, %{from: :held, to: :purchased}}
 
-    data =
-      data
-      |> Map.put(:current_customer, customer)
-
-    {:next_state, :purchased, data, [{:reply, from, :purchased}]}
+    {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
   end
 
-  def handle_event(:timeout, _timeout, :hold, data) do
+  @doc """
+  State can transition from `held` to `purchased`.
+  """
+  def handle_event({:call, from}, {:purchase, customer}, :held, data) do
+    %Customer{id: customer_id} = customer
+    %{current_customer: %Customer{id: current_customer_id}} = data
+
+    if customer_id == current_customer_id do
+      data =
+        data
+        |> Map.put(:current_customer, customer)
+
+      {:next_state, :purchased, data, [{:reply, from, {:ok, :purchased}}]}
+    else
+      reason = {:no_transition, :unavailable}
+      {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+    end
+  end
+
+  @doc """
+  Timeout is triggered when the current state is `held`.
+  State resets to the `default_state`.
+  """
+  def handle_event(:state_timeout, :hold_timeout, :held, data) do
     %{default_state: default_state} = data
 
     data =
